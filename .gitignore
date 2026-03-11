@@ -11,6 +11,7 @@ node_modules/
 .next/
 out/
 dist/
+.env.local
 
 # IDE
 .vscode/
