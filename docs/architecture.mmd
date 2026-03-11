@@ -1,0 +1,53 @@
+```mermaid
+sequenceDiagram
+    participant U as User (Next.js)
+    participant API as FastAPI (Render)
+    participant BG as BackgroundTask
+    participant SB as Supabase
+    participant S1 as Stage 1<br/>Signal Harvester
+    participant S2 as Stage 2<br/>Contact Resolver
+    participant S3 as Stage 3<br/>Research Analyst
+    participant S4 as Stage 4<br/>Outreach Sender
+
+    U->>API: POST /run-outreach {company, domain, icp}
+    API->>SB: INSERT jobs(job_id, status=queued)
+    API-->>U: 202 { job_id }
+    API->>BG: add_task(run_agent, job_id)
+
+    par SSE Streaming
+        U->>API: GET /stream/{job_id}
+        loop poll every 500ms
+            API->>SB: SELECT agent_events WHERE job_id
+            SB-->>API: new events
+            API-->>U: data: {stage, message, data}
+        end
+    end
+
+    BG->>S1: run_signal_harvester(company, domain)
+    Note over S1: Serper (funding) + Greenhouse/Lever (hiring)<br/>+ BuiltWith (tech stack) + Tavily (news)<br/>All concurrent via asyncio.gather()
+    S1->>SB: INSERT agent_events (stage_1)
+    S1-->>BG: SignalResult { funding, hiring_roles[], tech_stack[], news }
+
+    BG->>S2: run_contact_resolver(domain)
+    Note over S2: Apollo → Hunter → Snov.io SMTP verify
+    S2->>SB: INSERT agent_events (stage_2)
+    S2-->>BG: ContactResult { name, title, email, confidence }
+
+    alt contact.found == false
+        BG->>SB: INSERT agent_events (done, contact_not_found)
+        BG-->>U: SSE done event
+    else contact found
+        BG->>S3: run_research_analyst(signals, contact, icp)
+        Note over S3: Groq Llama 3.3 70B<br/>Citation check → retry if >40% invalid
+        S3->>SB: INSERT agent_events (stage_3)
+        S3-->>BG: AccountBrief { p1, p2, pain_points[], signal_citations[] }
+
+        BG->>S4: run_outreach_sender(contact, brief, icp)
+        Note over S4: Compose → Lint → Critic debate<br/>→ Revisor (if needed) → Resend.com
+        S4->>SB: INSERT outreach_log (dedup_key, quality_score)
+        S4->>SB: INSERT agent_events (stage_4, done)
+        S4-->>BG: SendResult { message_id, quality_score, email_preview }
+    end
+
+    BG->>SB: UPSERT jobs(status=done)
+```

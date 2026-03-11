@@ -1,0 +1,73 @@
+services:
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  - type: web
+    name: firereach-api
+    env: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
+      - key: HUNTER_API_KEY
+        sync: false
+      - key: SNOVIO_CLIENT_ID
+        sync: false
+      - key: SNOVIO_CLIENT_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: BUILTWITH_API_KEY
+        value: free
+      - key: FROM_EMAIL
+        sync: false
+      - key: UNSUB_EMAIL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # ── N8N Automation Layer ───────────────────────────────────────────────────
+  - type: web
+    name: firereach-n8n
+    env: docker
+    dockerfilePath: ./n8n/Dockerfile
+    envVars:
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: "true"
+      - key: N8N_BASIC_AUTH_USER
+        sync: false
+      - key: N8N_BASIC_AUTH_PASSWORD
+        sync: false
+      - key: DB_TYPE
+        value: postgresdb
+      - key: DB_POSTGRESDB_HOST
+        sync: false
+      - key: DB_POSTGRESDB_PORT
+        value: "5432"
+      - key: DB_POSTGRESDB_DATABASE
+        value: n8n
+      - key: DB_POSTGRESDB_USER
+        sync: false
+      - key: DB_POSTGRESDB_PASSWORD
+        sync: false
+      - key: FIREREACH_API_URL
+        sync: false
+      - key: DEFAULT_ICP
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: SHEETS_DOC_ID
+        sync: false

@@ -1,0 +1,174 @@
+{
+  "name": "FireReach — Always-On SDR Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 24 }] }
+      },
+      "id": "cron-trigger",
+      "name": "Daily Scan Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://news.google.com/rss/search?q=series+b+funding+tech+startup&hl=en-US&gl=US&ceid=US:en",
+        "options": {}
+      },
+      "id": "rss-node",
+      "name": "Google Alerts RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ICP Scoring Engine\n// Runs before firing the outreach API — only high-fit companies proceed.\nconst items = $input.all();\nconst scored = [];\n\nfor (const item of items) {\n  const title = (item.json.title || '').toLowerCase();\n  const content = (item.json.content || '').toLowerCase();\n  const text = title + ' ' + content;\n\n  let score = 0;\n  const reasons = [];\n\n  // Funding signal\n  if (/series b/.test(text)) { score += 4; reasons.push('Series B funding'); }\n  else if (/series [ac]/.test(text)) { score += 2; reasons.push('Funding round'); }\n\n  // Hiring signal (proxy: job board mentions)\n  if (/hiring|we.re growing|join our team/.test(text)) { score += 3; reasons.push('Active hiring'); }\n\n  // Security angle\n  if (/security|compliance|infra|soc 2|gdpr|devops/.test(text)) { score += 2; reasons.push('Security relevance'); }\n\n  // Recent growth\n  if (/expand|launch|acquire|partnership/.test(text)) { score += 1; reasons.push('Growth signal'); }\n\n  const label = score >= 8 ? 'High Fit' : score >= 5 ? 'Good Fit' : 'Low Fit';\n\n  scored.push({\n    json: {\n      ...item.json,\n      icp_score: score,\n      icp_label: label,\n      icp_reasons: reasons,\n      proceed: score >= 5\n    }\n  });\n}\n\nreturn scored;"
+      },
+      "id": "icp-scorer",
+      "name": "ICP Scoring Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.proceed }}", "value2": true }]
+        }
+      },
+      "id": "icp-filter",
+      "name": "Filter: Score >= 5",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FIREREACH_API_URL }}/run-outreach",
+        "authentication": "none",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={\n  \"company_name\": \"{{ $json.title.split(' ')[0] }}\",\n  \"company_domain\": \"example.com\",\n  \"icp_description\": \"{{ $env.DEFAULT_ICP }}\",\n  \"tone\": \"consultative\"\n}",
+        "options": {}
+      },
+      "id": "firereach-trigger",
+      "name": "Fire FireReach API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1080, 200]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "wait-node",
+      "name": "Wait 5s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1300, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FIREREACH_API_URL }}/status/{{ $('Fire FireReach API').item.json.job_id }}",
+        "options": {}
+      },
+      "id": "poll-status",
+      "name": "Poll Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1500, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.job.status }}",
+              "operation": "equals",
+              "value2": "done"
+            }
+          ]
+        }
+      },
+      "id": "done-check",
+      "name": "Job Done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1700, 200]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=✅ FireReach sent email!\nJob: {{ $('Fire FireReach API').item.json.job_id }}\nSignals: {{ $json.job.icp_label ?? 'N/A' }}",
+        "additionalFields": {}
+      },
+      "id": "telegram-notify",
+      "name": "Telegram Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1900, 140]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "={{ $env.SHEETS_DOC_ID }}", "mode": "id" },
+        "sheetName": "Outreach Log",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "sheets-log",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.3,
+      "position": [1900, 280]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "={{ $env.SHEETS_DOC_ID }}", "mode": "id" },
+        "sheetName": "Skipped",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        }
+      },
+      "id": "log-skipped",
+      "name": "Log Skipped (Low ICP)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.3,
+      "position": [1080, 420]
+    }
+  ],
+  "connections": {
+    "Daily Scan Trigger": { "main": [[{ "node": "Google Alerts RSS", "type": "main", "index": 0 }]] },
+    "Google Alerts RSS": { "main": [[{ "node": "ICP Scoring Engine", "type": "main", "index": 0 }]] },
+    "ICP Scoring Engine": { "main": [[{ "node": "Filter: Score >= 5", "type": "main", "index": 0 }]] },
+    "Filter: Score >= 5": {
+      "main": [
+        [{ "node": "Fire FireReach API", "type": "main", "index": 0 }],
+        [{ "node": "Log Skipped (Low ICP)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fire FireReach API": { "main": [[{ "node": "Wait 5s", "type": "main", "index": 0 }]] },
+    "Wait 5s": { "main": [[{ "node": "Poll Job Status", "type": "main", "index": 0 }]] },
+    "Poll Job Status": { "main": [[{ "node": "Job Done?", "type": "main", "index": 0 }]] },
+    "Job Done?": {
+      "main": [
+        [
+          { "node": "Telegram Notification", "type": "main", "index": 0 },
+          { "node": "Log to Google Sheets", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Wait 5s", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "versionId": "firereach-v2"
+}
