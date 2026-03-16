@@ -1,25 +1,28 @@
 """
-FireReach — Stage 4: Outreach Automated Sender (LLM + HTTP)
+FireReach — Stage 4: Outreach Automated Sender (LLM + Gmail SMTP)
 
 Pipeline:
   1. LLM Composer generates email draft (Groq Llama 3.3 70B)
   2. Email Linter validates (word count + cliché detector)
   3. LLM Critic evaluates quality (specificity, CTA clarity)
   4. If critic fails → Revisor re-drafts (max 1 retry)
-  5. Resend.com dispatches the final email
+  5. Gmail SMTP dispatches the final email (via App Password — no sender restriction)
   6. Idempotency key prevents duplicate sends within 72 hours
   7. Full audit log written to Supabase
 """
 
 from __future__ import annotations
+import asyncio
 import hashlib
 import json
 import os
 import re
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from datetime import date, datetime, timezone
 
 import httpx
-import resend  # pip install resend
 
 from models import AccountBrief, ContactResult, EmailDraft, SendResult
 from validators import validate_email
@@ -58,7 +61,7 @@ async def _compose_email(
     else:
         system = COMPOSER_SYSTEM
 
-    raw = await chat_completion(system=system, user=user_prompt, temperature=0.6)
+    raw = await chat_completion(system=system, user=user_prompt, temperature=0.6, task_type="draft_email")
 
     # Strip markdown fences
     cleaned = raw.strip()
@@ -91,7 +94,7 @@ async def _critique_email(subject: str, body: str, brief: AccountBrief) -> dict:
     )
 
     raw = await chat_completion(
-        system=CRITIC_SYSTEM, user=user_prompt, temperature=0.2
+        system=CRITIC_SYSTEM, user=user_prompt, temperature=0.2, task_type="critic"
     )
 
     cleaned = raw.strip()
@@ -161,58 +164,49 @@ async def _log_send(
         pass   # logging failure should not block the send result
 
 
-# ─── Resend Dispatch ─────────────────────────────────────────────────────────
+# ─── Gmail SMTP Dispatch ─────────────────────────────────────────────────────
 
-def _send_via_resend(
-    recipient_email: str,
-    subject: str,
-    body: str,
-    from_address: str,
-    unsub_email: str,
-) -> dict:
-    resend.api_key = os.environ["RESEND_API_KEY"]
-    params: resend.Emails.SendParams = {
-        "from": from_address,
-        "to": [recipient_email],
-        "subject": subject,
-        "text": body,
-        "headers": {
-            "List-Unsubscribe": f"<mailto:{unsub_email}>",
-        },
-    }
-    return resend.Emails.send(params)
+async def send_email(to: str, subject: str, body_html: str) -> dict:
+    """
+    Dispatches an email via Gmail SMTP using an App Password.
 
+    Runs the blocking smtplib call inside a thread-pool executor so it does
+    not block the async event loop.
 
-# ─── SendGrid Fallback ─────────────────────────────────────────────────────────
+    Args:
+        to:        Recipient email address.
+        subject:   Email subject line.
+        body_html: HTML string for the email body.
 
-async def _send_via_sendgrid(
-    recipient_email: str,
-    subject: str,
-    body: str,
-    from_address: str,
-) -> str:
-    """Fallback email dispatch via SendGrid free tier."""
-    api_key = os.environ.get("SENDGRID_API_KEY")
-    if not api_key:
-        raise RuntimeError("SENDGRID_API_KEY not configured")
+    Returns:
+        A dict with keys ``status`` ("sent"), ``to``, and ``subject``.
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://api.sendgrid.com/v3/mail/send",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "personalizations": [{"to": [{"email": recipient_email}]}],
-                "from": {"email": from_address},
-                "subject": subject,
-                "content": [{"type": "text/plain", "value": body}],
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.headers.get("X-Message-Id", "sendgrid-ok")
+    Raises:
+        ValueError: If GMAIL_FROM or GMAIL_APP_PASSWORD are not set in .env.
+        RuntimeError: If the SMTP connection or login fails.
+    """
+    gmail_from = os.getenv("GMAIL_FROM")
+    gmail_password = os.getenv("GMAIL_APP_PASSWORD")
+
+    if not to:
+        raise ValueError("Recipient email address (to) must not be None or empty")
+
+    if not gmail_from or not gmail_password:
+        raise ValueError("GMAIL_FROM and GMAIL_APP_PASSWORD must be set in .env")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = gmail_from
+    msg["To"] = to
+    msg.attach(MIMEText(body_html, "html"))
+
+    def _send() -> None:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_from, gmail_password)
+            server.sendmail(gmail_from, to, msg.as_string())
+
+    await asyncio.get_event_loop().run_in_executor(None, _send)
+    return {"status": "sent", "to": to, "subject": subject}
 
 
 # ─── Public Entry Point ───────────────────────────────────────────────────────
@@ -230,14 +224,9 @@ async def run_outreach_sender(
         return SendResult(status="contact_not_found")
 
     recipient_email = contact.email
-    # Allow TEST_TO_EMAIL override (required when using onboarding@resend.dev)
-    test_override = os.environ.get("TEST_TO_EMAIL")
-    if test_override:
-        recipient_email = test_override
     recipient_name = (contact.name or "").split()[0] if contact.name else "there"
     recipient_title = contact.title or ""
 
-    from_address = os.environ.get("FROM_EMAIL", "outreach@mail.firereach.app")
     unsub_email = os.environ.get("UNSUB_EMAIL", "unsubscribe@mail.firereach.app")
     company = recipient_email.split("@")[-1] if "@" in recipient_email else "company"
 
@@ -297,21 +286,18 @@ async def run_outreach_sender(
             subject, body = revised_subject, revised_body
             quality_score = revised_score
 
-    # ── Dispatch ─────────────────────────────────────────────────────────────
+    # ── Dispatch via Gmail SMTP ────────────────────────────────────────────────
     message_id: str | None = None
     try:
-        result = _send_via_resend(recipient_email, subject, body, from_address, unsub_email)
-        message_id = result.get("id")
-    except Exception as resend_exc:
-        # Fallback to SendGrid
-        try:
-            message_id = await _send_via_sendgrid(recipient_email, subject, body, from_address)
-        except Exception as sg_exc:
-            return SendResult(
-                status="failed",
-                error=f"Resend: {resend_exc}; SendGrid: {sg_exc}",
-                quality_score=quality_score,
-            )
+        html_body = f"<p style='white-space: pre-wrap; font-family: sans-serif'>{body}</p>"
+        await send_email(to=recipient_email, subject=subject, body_html=html_body)
+        message_id = f"gmail-{dk[:12]}"
+    except Exception as smtp_exc:
+        return SendResult(
+            status="failed",
+            error=f"Gmail SMTP send failed: {smtp_exc}",
+            quality_score=quality_score,
+        )
 
     # ── Log to Supabase ───────────────────────────────────────────────────────
     await _log_send(
@@ -339,8 +325,9 @@ TOOL_SCHEMA = {
     "name": "tool_outreach_automated_sender",
     "description": (
         "Composes a hyper-personalised cold email grounded in the Account Brief and "
-        "dispatches it via Resend.com. Enforces word count, cliché rules, "
-        "multi-agent critic quality gate, and signal citation before sending."
+        "dispatches it via Gmail SMTP (App Password, any recipient). Enforces "
+        "word count, cliché rules, multi-agent critic quality gate, and signal "
+        "citation before sending."
     ),
     "parameters": {
         "type": "object",

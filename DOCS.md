@@ -1,4 +1,4 @@
-# FireReach v2.0 — Technical Documentation
+# FireReach v3.0 — Technical Documentation
 
 > **Prepared for:** Evaluation submission
 > **Organisation:** Rabbitt AI
@@ -54,12 +54,37 @@ sequenceDiagram
         S3-->>BG: AccountBrief { p1, p2, pain_points[], signal_citations[] }
 
         BG->>S4: run_outreach_sender(contact, brief, icp)
-        Note over S4: Compose → Lint → Critic → Revisor<br/>→ Resend.com dispatch → Supabase log
+        Note over S4: Compose → Lint → Critic → Revisor<br/>→ SendGrid dispatch → Supabase log
         S4->>SB: INSERT outreach_log (dedup_key, quality_score)
         S4->>SB: INSERT agent_events (stage_4, done)
         S4-->>BG: SendResult { message_id, quality_score, email_preview }
     end
 ```
+
+---
+
+## 1b. ICP Score Gate (v3.0)
+
+After Stage 1, the pipeline runs an ICP scoring pass before proceeding to email composition. Scores below the threshold short-circuit the pipeline:
+
+| Tier | Score range | Pipeline action |
+|---|---|---|
+| 🔥 hot | ≥ 80 | Full pipeline executes |
+| 🟡 warm | 55 – 79 | Full pipeline executes |
+| 🟠 potential | 30 – 54 | Halts — `status = queued_potential` |
+| ❌ poor_fit | < 30 | Halts — `status = skipped_poor_fit` |
+
+### Scoring components (0–100 total)
+
+| Component | Max score | Signals used |
+|---|---|---|
+| Funding stage match | 25 | `funding_signal.round` vs ICP `funding_stage` |
+| Hiring intent alignment | 20 | `hiring_signal.open_roles` → title match vs `target_titles` |
+| Tech stack fit | 15 | `tech_stack` overlap with relevant technologies |
+| Company size fit | 15 | Employee count range vs ICP `size_range` |
+| Industry match | 10 | BuiltWith/Tavily category vs ICP `industry` |
+| News relevance | 10 | Market signal headline relevance |
+| Geography match | 5 | `geography` intersection with ICP `geography` |
 
 ---
 
@@ -269,7 +294,7 @@ The N8N workflow file is at `n8n/workflow-export.json`.
 | Apollo.io | Free view-unlimited; 10 email exports/mo is the limit | Apollo Basic ($49/mo) |
 | Hunter.io | 25 domain searches/mo = 25 companies | Hunter Growth (500/mo, $34/mo) |
 | Snov.io | 50 verifies/mo; skip if budget allows Hunter handle it | Snov.io Trial ($33/mo) |
-| Resend.com | 3,000 emails/mo = 100 emails/day | Resend Pro ($20/mo) |
+| SendGrid | 100 emails/day free (replaces Resend) | SendGrid Essentials ($19.95/mo) |
 | Supabase | 500MB well above prototype needs | Supabase Pro ($25/mo) |
 | Render.com | Free tier with 750 hours/mo | Render Starter ($7/mo) |
 | Python dict cache | Zero cost; resets on process restart | Redis / Upstash ($0–$10/mo) |
@@ -296,4 +321,68 @@ The following email was generated during testing against a real Series B company
 
 ---
 
-*FireReach v2.0 — Rabbitt AI — March 2026 — Total Monthly Cost: ₹0*
+---
+
+## 7. API Rate Limits Reference
+
+| API | Free tier limit | FireReach usage | Notes |
+|---|---|---|---|
+| Groq (Llama 3.3 70B) | 14,400 req/day, 6,000 tokens/min | ~4 calls/run (research, score, critic, revisor) | Routed to `summarize`, `score`, `critic` tasks |
+| Gemini 1.5 Flash | 1,500 req/day, 1M context | ~1 call/run (email draft) | Routed to `draft_email` task |
+| Tavily | 1,000 searches/mo | S3 (security), S4 (sales), news fallback | ~3 searches/run |
+| BuiltWith | Free tier, no public limit | 1 lookup/run (tech stack) | Soft rate limit ~100/day |
+| Serper.dev | 2,500 searches/mo | S1 funding signal | ~1 search/run |
+| Greenhouse / Lever | Unlimited (HTML scrape) | S2 hiring signal | No auth required |
+| NewsAPI | 100 req/day (free tier) | S6 market signal | Falls back to Tavily on exhaustion |
+| Hunter.io | 25 domain searches/mo | Stage 2 primary contact | 1 search/run |
+| Snov.io | 50 credits/mo | Stage 2 fallback contact | 1 credit/run |
+| Apollo.io | 10 email exports/mo (free) | Enrichment — seniority upgrade | 1 call/run, optional |
+| SendGrid | 100 emails/day (free) | Stage 4 dispatch | 1 email/run |
+| Supabase | 500MB database, 2GB transfer | Event log, job tracking | Well under free tier |
+
+---
+
+## 8. LLM Model Routing (v3.0)
+
+`llm_client.chat_completion` accepts a `task_type` parameter that selects the optimal model:
+
+| `task_type` | Model | Rationale |
+|---|---|---|
+| `summarize` | Groq Llama 3.3 70B | Fast, analytical — signal and research summarization |
+| `score` | Groq Llama 3.3 70B | ICP fit scoring and `why_now` generation |
+| `draft_email` | Gemini 1.5 Flash | 1M context; better creative prose for cold emails |
+| `critic` | Groq Llama 3.3 70B | Fast evaluation of email quality rubric |
+| `extract` | Groq Llama 3.3 70B | Structured data extraction from HTML/text |
+| `default` | Groq Llama 3.3 70B | Catch-all |
+
+Each caller falls back to the other provider on any API error.
+
+---
+
+## 9. Running the Eval Suite
+
+The eval suite tests the full pipeline against 5 real companies (Retool, Linear, Vercel, Stripe, Notion).
+
+**Prerequisites:** All API keys set in `.env` (or environment variables).
+
+```bash
+# From the backend/ directory:
+pip install -r requirements.txt
+python -m pytest tests/test_pipeline.py -v --tb=short
+
+# Or as standalone (generates eval_results.json):
+python tests/test_pipeline.py
+```
+
+**Assertions checked per company:**
+- Contact resolved (email found)
+- ICP score in range 0–100
+- Pipeline status in known set (`sent`, `skipped_*`, `queued_*`, `error`)
+
+Results are written to `backend/tests/eval_results.json` with per-company metrics and a summary row.
+
+**Target benchmark:** ≥ 80% contact resolution rate across all test companies.
+
+---
+
+*FireReach v3.0 — Rabbitt AI — March 2026 — Total Monthly Cost: ₹0*

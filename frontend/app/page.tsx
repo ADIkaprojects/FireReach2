@@ -1,143 +1,62 @@
 'use client';
 
-// app/page.tsx — FireReach main UI
-// ICP form + live agent step stream + email result display
+// app/page.tsx — FireReach v3 — two-panel live outreach UI
 
-import { useState, FormEvent } from 'react';
-import { useAgentStream, AgentEvent } from '../hooks/useAgentStream';
+import { useState } from 'react';
+import { useAgentStream } from '../hooks/useAgentStream';
+import ICPForm, { ICPFormValues } from '../components/ICPForm';
+import LaunchButton from '../components/LaunchButton';
+import PipelineStageCard from '../components/PipelineStageCard';
+import ICPScoreGauge from '../components/ICPScoreGauge';
+import ContactCard from '../components/ContactCard';
+import SignalSummaryPanel from '../components/SignalSummaryPanel';
+import EmailPreviewCard from '../components/EmailPreviewCard';
+import AuditTimeline from '../components/AuditTimeline';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Validation ───────────────────────────────────────────────────────────────
 
-interface OutreachRequest {
-  company_name: string;
-  company_domain: string;
-  icp_description: string;
-  tone: 'warm' | 'direct' | 'consultative';
+function validate(v: ICPFormValues): Partial<Record<keyof ICPFormValues, string>> {
+  const e: Partial<Record<keyof ICPFormValues, string>> = {};
+  if (!v.company_name.trim()) e.company_name = 'Company name is required.';
+  if (!v.company_domain.trim()) e.company_domain = 'Domain is required.';
+  else if (!/^[a-z0-9-]+\.[a-z]{2,}$/i.test(v.company_domain.trim()))
+    e.company_domain = 'Enter a valid domain (e.g. acme.com).';
+  if (!v.industry) e.industry = 'Select an industry.';
+  if (!v.size_range) e.size_range = 'Select a company size.';
+  if (!v.funding_stage) e.funding_stage = 'Select a funding stage.';
+  if (v.geography.length === 0) e.geography = 'Select at least one geography.';
+  if (v.target_titles.length === 0) e.target_titles = 'Select at least one title.';
+  if (!v.pain_points.trim()) e.pain_points = 'Describe the pain points you solve.';
+  if (!v.your_product.trim()) e.your_product = 'Describe your product or service.';
+  return e;
 }
 
-// ─── Stage labels for the progress timeline ──────────────────────────────────
-
-const STAGE_LABELS: Record<string, string> = {
-  init: '🚀 Initialising',
-  stage_1: '📡 Signal Harvester',
-  stage_2: '🔍 Contact Resolver',
-  stage_3: '🧠 Research Analyst',
-  stage_4: '📧 Outreach Sender',
-  error: '❌ Error',
+const EMPTY_FORM: ICPFormValues = {
+  company_name: '',
+  company_domain: '',
+  industry: '',
+  size_range: '',
+  funding_stage: '',
+  geography: [],
+  pain_points: '',
+  your_product: '',
+  target_titles: [],
+  tone: 'consultative',
 };
 
-// ─── Sub-components ──────────────────────────────────────────────────────────
+// ─── Stage config ─────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    idle: 'bg-gray-100 text-gray-600',
-    connecting: 'bg-yellow-100 text-yellow-700',
-    running: 'bg-blue-100 text-blue-700',
-    done: 'bg-green-100 text-green-700',
-    error: 'bg-red-100 text-red-700',
-  };
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-3 py-1 text-sm font-medium ${colors[status] ?? colors.idle}`}
-    >
-      {status === 'running' && (
-        <span className="mr-2 h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-      )}
-      {status.charAt(0).toUpperCase() + status.slice(1)}
-    </span>
-  );
-}
+const STAGES = [
+  { stage: 1, title: 'Signal Harvester', tool: 'signal_harvester', key: 'stage_1' },
+  { stage: 2, title: 'Contact Resolver', tool: 'contact_resolver', key: 'stage_2' },
+  { stage: 3, title: 'Research Analyst', tool: 'research_analyst', key: 'stage_3' },
+  { stage: 4, title: 'Outreach Sender',  tool: 'outreach_sender',  key: 'stage_4' },
+] as const;
 
-function IcpScoreBadge({ score, label }: { score: number; label: string }) {
-  const color =
-    score >= 8
-      ? 'bg-green-100 text-green-700 border-green-300'
-      : score >= 5
-      ? 'bg-yellow-100 text-yellow-700 border-yellow-300'
-      : 'bg-red-100 text-red-700 border-red-300';
-  return (
-    <span
-      className={`inline-flex items-center rounded-lg border px-3 py-1 text-sm font-semibold ${color}`}
-    >
-      ICP Match: {score}/10 — {label}
-    </span>
-  );
-}
-
-function QualityBadge({ score }: { score: number }) {
-  const color =
-    score >= 8
-      ? 'bg-indigo-100 text-indigo-700'
-      : score >= 6
-      ? 'bg-blue-100 text-blue-700'
-      : 'bg-gray-100 text-gray-600';
-  return (
-    <span className={`inline-flex items-center rounded-lg px-3 py-1 text-sm font-semibold ${color}`}>
-      Quality Score: {score.toFixed(1)} / 10
-    </span>
-  );
-}
-
-function EventRow({ event }: { event: AgentEvent }) {
-  const label = STAGE_LABELS[event.stage ?? ''] ?? event.stage ?? '•';
-  const isError = event.status === 'error';
-  const isDone = event.status === 'done';
-
-  return (
-    <div
-      className={`rounded-lg border p-4 text-sm ${
-        isError
-          ? 'border-red-200 bg-red-50'
-          : isDone
-          ? 'border-green-200 bg-green-50'
-          : 'border-gray-200 bg-white'
-      }`}
-    >
-      <div className="flex items-start justify-between gap-4">
-        <span className="font-medium text-gray-800">{label}</span>
-        <span className="shrink-0 text-xs text-gray-400">
-          {new Date(event.timestamp).toLocaleTimeString()}
-        </span>
-      </div>
-      <p className="mt-1 text-gray-600">{event.message}</p>
-
-      {/* Stage-specific data cards */}
-      {event.stage === 'stage_1' && event.data != null && event.data.icp_score !== undefined ? (
-        <div className="mt-2">
-          <IcpScoreBadge
-            score={Number(event.data.icp_score)}
-            label={String(event.data.icp_label ?? '')}
-          />
-          {Array.isArray(event.data.tech_stack) && event.data.tech_stack.length > 0 ? (
-            <p className="mt-1 text-xs text-gray-500">
-              Tech: {(event.data.tech_stack as string[]).slice(0, 5).join(', ')}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {event.stage === 'stage_2' && event.data?.name != null ? (
-        <p className="mt-1 text-xs text-gray-500">
-          {String(event.data.name)} · {String(event.data.title ?? '')} ·{' '}
-          {event.data.smtp_verified ? '✓ SMTP verified' : '⚠ unverified'}
-        </p>
-      ) : null}
-
-      {event.stage === 'stage_4' && event.data?.quality_score !== undefined && (
-        <div className="mt-2 space-y-2">
-          <QualityBadge score={Number(event.data.quality_score)} />
-          {!!event.data.email_preview && (
-            <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs text-gray-700 font-mono">
-              {String(event.data.email_preview)}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+type StageKey = (typeof STAGES)[number]['key'];
+type StageStatus = 'idle' | 'active' | 'complete' | 'error';
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
@@ -145,28 +64,86 @@ export default function Home() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formValues, setFormValues] = useState<ICPFormValues>(EMPTY_FORM);
+  const [formErrors, setFormErrors] = useState<Partial<Record<keyof ICPFormValues, string>>>({});
 
   const { events, status, reset } = useAgentStream(jobId);
 
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  const isRunning = isSubmitting || status === 'connecting' || status === 'running';
+  const isDone = status === 'done' || status === 'error';
+
+  // ── derive per-stage status from SSE events ──
+  const stageStatuses = STAGES.reduce<Record<StageKey, StageStatus>>(
+    (acc, s) => { acc[s.key] = 'idle'; return acc; },
+    {} as Record<StageKey, StageStatus>
+  );
+  for (const evt of events) {
+    const key = evt.stage as StageKey | null;
+    if (!key || !(key in stageStatuses)) continue;
+    if (evt.status === 'error') stageStatuses[key] = 'error';
+    else if (evt.status === 'done') stageStatuses[key] = 'complete';
+    else stageStatuses[key] = 'active';
+  }
+
+  // ── derive per-stage latest output message ──
+  const stageOutputs = STAGES.reduce<Record<StageKey, string>>(
+    (acc, s) => { acc[s.key] = ''; return acc; },
+    {} as Record<StageKey, string>
+  );
+  for (const evt of events) {
+    const key = evt.stage as StageKey | null;
+    if (key && key in stageOutputs && evt.message) stageOutputs[key] = evt.message;
+  }
+
+  // ── parse result data from last relevant events ──
+  const lastByStage = (key: string) =>
+    [...events].reverse().find((e) => e.stage === key);
+
+  const icpScoreEvent = lastByStage('icp_score');
+  const icpScoreResult = icpScoreEvent?.data as Record<string, unknown> | null | undefined;
+
+  const stage2Event = lastByStage('stage_2');
+  const contact = stage2Event?.data as Record<string, unknown> | null | undefined;
+
+  const stage1Event = lastByStage('stage_1');
+  const signalsData = stage1Event?.data as Record<string, unknown> | null | undefined;
+
+  const stage4Event = lastByStage('stage_4');
+  const emailData = stage4Event?.data as Record<string, unknown> | null | undefined;
+
+  // ── signal list for SignalSummaryPanel ──
+  const signalRows = signalsData
+    ? [
+        { type: 'Funding Signal (S1)', found: !!signalsData.funding_signal, detail: signalsData.funding_signal ? String((signalsData.funding_signal as Record<string, unknown>).summary ?? '') : '' },
+        { type: 'Hiring Signal (S2)',  found: !!signalsData.hiring_signal,  detail: signalsData.hiring_signal  ? `${(signalsData.hiring_signal as Record<string, unknown>).open_roles ?? 0} roles` : '' },
+        { type: 'Security Signal (S3)', found: !!signalsData.security_signal, detail: signalsData.security_signal ? String((signalsData.security_signal as Record<string, unknown>).summary ?? '') : '' },
+        { type: 'Sales Signal (S4)',  found: !!signalsData.sales_signal,  detail: signalsData.sales_signal   ? String((signalsData.sales_signal as Record<string, unknown>).summary ?? '') : '' },
+        { type: 'Tech Stack (S5)',    found: Array.isArray(signalsData.tech_stack) && (signalsData.tech_stack as unknown[]).length > 0, detail: Array.isArray(signalsData.tech_stack) ? (signalsData.tech_stack as string[]).slice(0, 5).join(', ') : '' },
+        { type: 'Market Signal (S6)', found: !!signalsData.market_signal,  detail: signalsData.market_signal  ? String((signalsData.market_signal as Record<string, unknown>).headline ?? '') : '' },
+      ]
+    : [];
+
+  async function handleLaunch() {
+    const errs = validate(formValues);
+    if (Object.keys(errs).length > 0) { setFormErrors(errs); return; }
+    setFormErrors({});
     setFormError(null);
     reset();
 
-    const form = e.currentTarget;
-    const data = new FormData(form);
-
-    const payload: OutreachRequest = {
-      company_name: (data.get('company_name') as string).trim(),
-      company_domain: (data.get('company_domain') as string).trim(),
-      icp_description: (data.get('icp_description') as string).trim(),
-      tone: data.get('tone') as OutreachRequest['tone'],
+    const payload = {
+      company_name: formValues.company_name.trim(),
+      company_domain: formValues.company_domain.trim(),
+      tone: formValues.tone,
+      icp: {
+        industry: formValues.industry,
+        size_range: formValues.size_range,
+        funding_stage: formValues.funding_stage,
+        geography: formValues.geography,
+        pain_points: formValues.pain_points.trim(),
+        your_product: formValues.your_product.trim(),
+        target_titles: formValues.target_titles,
+      },
     };
-
-    if (!payload.company_name || !payload.company_domain || !payload.icp_description) {
-      setFormError('All fields are required.');
-      return;
-    }
 
     setIsSubmitting(true);
     try {
@@ -175,12 +152,10 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
         throw new Error((err as { detail: string }).detail ?? 'Request failed');
       }
-
       const { job_id } = (await res.json()) as { job_id: string };
       setJobId(job_id);
     } catch (err) {
@@ -190,158 +165,224 @@ export default function Home() {
     }
   }
 
-  const isDone = status === 'done' || status === 'error';
-  const lastStage4 = [...events].reverse().find((e) => e.stage === 'stage_4');
-  const emailSent =
-    lastStage4?.data?.status === 'sent' ||
-    (lastStage4?.status === 'done' && lastStage4?.data?.message_id);
+  function handleReset() {
+    setJobId(null);
+    reset();
+    setFormValues(EMPTY_FORM);
+    setFormErrors({});
+    setFormError(null);
+  }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-orange-50 to-amber-50 px-4 py-12">
-      <div className="mx-auto max-w-2xl space-y-8">
-        {/* Header */}
-        <header className="text-center">
-          <h1 className="text-4xl font-bold text-orange-600">🔥 FireReach</h1>
-          <p className="mt-2 text-gray-600 text-lg">
-            Autonomous outreach engine — signals → contact → brief → email
-          </p>
-        </header>
+    <div
+      className="min-h-screen"
+      style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
+    >
+      {/* ── Top Nav ── */}
+      <nav
+        className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 border-b"
+        style={{ background: 'var(--bg-card)', borderColor: 'var(--border)' }}
+      >
+        <div className="flex items-center gap-2">
+          <span style={{ fontSize: '1.3rem' }}>🔥</span>
+          <span className="font-bold tracking-wide" style={{ color: 'var(--accent)' }}>
+            FireReach
+          </span>
+          <span
+            className="text-xs rounded-full px-2 py-0.5 ml-1"
+            style={{ background: 'rgba(249,115,22,0.15)', color: 'var(--accent)' }}
+          >
+            v3.0
+          </span>
+        </div>
+        <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+          Autonomous outreach engine
+        </span>
+      </nav>
 
-        {/* Input Form */}
-        <section className="rounded-2xl border border-orange-100 bg-white p-6 shadow-sm">
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div>
-              <label htmlFor="company_name" className="block text-sm font-medium text-gray-700">
-                Company Name
-              </label>
-              <input
-                id="company_name"
-                name="company_name"
-                type="text"
-                placeholder="Acme Corp"
-                required
-                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400"
-              />
-            </div>
+      {/* ── Two-panel body ── */}
+      <div className="flex flex-col md:flex-row gap-6 p-6 max-w-[1400px] mx-auto">
 
-            <div>
-              <label htmlFor="company_domain" className="block text-sm font-medium text-gray-700">
-                Company Domain
-              </label>
-              <input
-                id="company_domain"
-                name="company_domain"
-                type="text"
-                placeholder="acme.com"
-                required
-                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400"
-              />
-            </div>
+        {/* ─── LEFT PANEL (30%) — ICP Form + Launch ─── */}
+        <aside
+          className="w-full md:w-[30%] shrink-0 rounded-xl p-5 self-start sticky top-[73px]"
+          style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
+        >
+          <h2
+            className="text-sm font-bold uppercase tracking-widest mb-4"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            Target Profile
+          </h2>
 
-            <div>
-              <label htmlFor="icp_description" className="block text-sm font-medium text-gray-700">
-                Your ICP &amp; Value Proposition
-              </label>
-              <textarea
-                id="icp_description"
-                name="icp_description"
-                rows={4}
-                placeholder="e.g. We sell a cloud security posture management platform to Series B–D SaaS companies scaling their infrastructure. Our ICP is security engineers and CTOs concerned about compliance and infrastructure exposure as headcount grows."
-                required
-                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400"
-              />
-            </div>
+          <ICPForm
+            values={formValues}
+            onChange={setFormValues}
+            errors={formErrors}
+            disabled={isRunning}
+          />
 
-            <div>
-              <label htmlFor="tone" className="block text-sm font-medium text-gray-700">
-                Email Tone
-              </label>
-              <select
-                id="tone"
-                name="tone"
-                defaultValue="consultative"
-                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400"
-              >
-                <option value="consultative">Consultative</option>
-                <option value="direct">Direct</option>
-                <option value="warm">Warm</option>
-              </select>
-            </div>
-
-            {formError && (
-              <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">{formError}</p>
-            )}
-
-            <button
-              type="submit"
-              disabled={isSubmitting || (!!jobId && !isDone)}
-              className="w-full rounded-lg bg-orange-500 px-4 py-3 font-semibold text-white transition hover:bg-orange-600 disabled:opacity-50"
+          {formError && (
+            <p
+              className="mt-3 text-xs rounded-lg px-3 py-2"
+              style={{ background: 'rgba(239,68,68,0.1)', color: 'var(--error)' }}
             >
-              {isSubmitting ? 'Starting…' : jobId && !isDone ? 'Running…' : '🔥 Run FireReach'}
-            </button>
-          </form>
-        </section>
+              {formError}
+            </p>
+          )}
 
-        {/* Live Agent Stream */}
-        {jobId && (
-          <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-800">Agent Live Stream</h2>
-              <StatusBadge status={status} />
-            </div>
+          <div className="mt-5">
+            {isDone ? (
+              <button
+                onClick={handleReset}
+                className="w-full rounded-xl py-3 text-sm font-semibold transition"
+                style={{
+                  background: 'rgba(255,255,255,0.07)',
+                  color: 'var(--text-secondary)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                ↩ Run Another
+              </button>
+            ) : (
+              <LaunchButton
+                isLoading={isRunning}
+                disabled={isRunning}
+                onClick={handleLaunch}
+              />
+            )}
+          </div>
+        </aside>
 
-            <div className="space-y-3">
-              {events.map((evt, i) => (
-                <EventRow key={evt.id ?? i} event={evt} />
+        {/* ─── RIGHT PANEL (70%) — Pipeline + Results ─── */}
+        <main className="flex-1 min-w-0 space-y-6">
+
+          {/* ── Pipeline stages ── */}
+          <section>
+            <h2
+              className="text-sm font-bold uppercase tracking-widest mb-3"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              Pipeline
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {STAGES.map(({ stage, title, tool, key }) => (
+                <PipelineStageCard
+                  key={key}
+                  stage={stage}
+                  title={title}
+                  tool={tool}
+                  status={stageStatuses[key]}
+                  output={stageOutputs[key]}
+                />
               ))}
-              {status === 'connecting' && (
-                <div className="rounded-lg border border-dashed border-gray-300 p-4 text-center text-sm text-gray-400">
-                  Connecting to agent stream…
-                </div>
+            </div>
+          </section>
+
+          {/* ── ICP Score — shown after icp_score event ── */}
+          {icpScoreResult && (
+            <section>
+              <h2
+                className="text-sm font-bold uppercase tracking-widest mb-3"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                ICP Fit Score
+              </h2>
+              <ICPScoreGauge
+                score={Number(icpScoreResult.total_score ?? 0)}
+                tier={String(icpScoreResult.tier ?? 'poor_fit') as 'hot' | 'warm' | 'potential' | 'poor_fit'}
+                breakdown={
+                  icpScoreResult.breakdown as Record<string, { score: number; max: number; label: string }> | undefined
+                }
+              />
+              {icpScoreResult.why_now && (
+                <p
+                  className="mt-3 text-sm rounded-lg px-4 py-3"
+                  style={{ background: 'rgba(249,115,22,0.08)', color: 'var(--text-secondary)', border: '1px solid rgba(249,115,22,0.2)' }}
+                >
+                  <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Why now: </span>
+                  {String(icpScoreResult.why_now)}
+                </p>
+              )}
+            </section>
+          )}
+
+          {/* ── Results row: Contact + Signals ── */}
+          {(contact || signalRows.length > 0) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {contact && contact.name && (
+                <section>
+                  <h2
+                    className="text-sm font-bold uppercase tracking-widest mb-3"
+                    style={{ color: 'var(--text-muted)' }}
+                  >
+                    Contact
+                  </h2>
+                  <ContactCard
+                    name={String(contact.name)}
+                    title={String(contact.title ?? '')}
+                    email={String(contact.email ?? '')}
+                    verified={!!contact.smtp_verified}
+                    linkedin_url={contact.linkedin_url ? String(contact.linkedin_url) : undefined}
+                    seniority={contact.seniority ? String(contact.seniority) : undefined}
+                  />
+                </section>
+              )}
+              {signalRows.length > 0 && (
+                <section>
+                  <h2
+                    className="text-sm font-bold uppercase tracking-widest mb-3"
+                    style={{ color: 'var(--text-muted)' }}
+                  >
+                    Signals
+                  </h2>
+                  <SignalSummaryPanel signals={signalRows} />
+                </section>
               )}
             </div>
+          )}
 
-            {/* Final summary */}
-            {isDone && (
-              <div
-                className={`rounded-xl border-2 p-5 text-center ${
-                  emailSent
-                    ? 'border-green-300 bg-green-50'
-                    : 'border-yellow-300 bg-yellow-50'
-                }`}
+          {/* ── Email preview ── */}
+          {emailData && emailData.email_preview && (
+            <section>
+              <h2
+                className="text-sm font-bold uppercase tracking-widest mb-3"
+                style={{ color: 'var(--text-muted)' }}
               >
-                {emailSent ? (
-                  <>
-                    <p className="text-2xl">✅</p>
-                    <p className="mt-1 font-semibold text-green-700">Email dispatched successfully</p>
-                    {lastStage4?.data?.quality_score !== undefined && (
-                      <div className="mt-2 flex justify-center">
-                        <QualityBadge score={Number(lastStage4.data.quality_score)} />
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <p className="text-2xl">⚠️</p>
-                    <p className="mt-1 font-semibold text-yellow-700">
-                      {String(lastStage4?.message ?? 'Pipeline complete — check logs for details')}
-                    </p>
-                  </>
-                )}
-                <button
-                  onClick={() => {
-                    setJobId(null);
-                    reset();
-                  }}
-                  className="mt-4 rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
-                >
-                  Run another
-                </button>
-              </div>
-            )}
-          </section>
-        )}
+                Generated Email
+              </h2>
+              <EmailPreviewCard
+                subject={emailData.subject ? String(emailData.subject) : 'Outreach from FireReach'}
+                body={String(emailData.email_preview)}
+                recipient={contact?.email ? String(contact.email) : ''}
+              />
+            </section>
+          )}
+
+          {/* ── Audit Timeline (always visible when events exist) ── */}
+          {events.length > 0 && (
+            <section>
+              <AuditTimeline events={events} />
+            </section>
+          )}
+
+          {/* ── Empty state ── */}
+          {!jobId && events.length === 0 && (
+            <div
+              className="flex flex-col items-center justify-center rounded-xl py-20 text-center"
+              style={{ border: '1px dashed var(--border)' }}
+            >
+              <span style={{ fontSize: '3rem' }}>🔥</span>
+              <p className="mt-4 text-lg font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                Configure your target profile
+              </p>
+              <p className="mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+                Fill in the ICP form on the left and click Launch FireReach
+              </p>
+            </div>
+          )}
+        </main>
       </div>
-    </main>
+    </div>
   );
 }

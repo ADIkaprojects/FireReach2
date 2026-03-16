@@ -11,8 +11,9 @@ LLM: Groq Llama 3.3 70B (primary) with Gemini Flash fallback for large contexts.
 from __future__ import annotations
 import json
 import os
+from typing import Optional
 
-from models import AccountBrief, ContactResult, SignalResult
+from models import AccountBrief, ContactResult, SignalResult, ICPProfile
 from validators import check_citations
 from agent.prompts import RESEARCH_ANALYST_SYSTEM, RESEARCH_ANALYST_RETRY_SUFFIX
 from agent.tools.llm_client import chat_completion, count_tokens
@@ -25,22 +26,43 @@ async def run_research_analyst(
     signals: SignalResult,
     contact: ContactResult,
     icp_description: str,
+    icp: Optional[ICPProfile] = None,
 ) -> AccountBrief:
     """
     Generates a grounded Account Brief. Validates citations against actual
     signal data — retries with a stricter prompt if hallucination ratio > 40%.
+
+    Args:
+        company_name:    Target company name.
+        signals:         Harvested signal data from Stage 1.
+        contact:         Resolved contact from Stage 2.
+        icp_description: Free-text ICP description used in the prompt.
+        icp:             Structured ICPProfile for richer prompt context (optional).
+
+    Returns:
+        AccountBrief with grounded, citation-validated content.
     """
     signals_json = signals.model_dump_json(exclude_none=False)
     contact_json = contact.model_dump_json(exclude_none=False)
 
-    prompt_tokens = count_tokens(signals_json + contact_json + icp_description)
+    # Build richer ICP context if structured profile is available
+    icp_context = icp_description
+    if icp:
+        icp_context = (
+            f"{icp_description}\n\n"
+            f"Product: {icp.your_product}\n"
+            f"Pain points: {icp.pain_points}\n"
+            f"Target titles: {', '.join(icp.target_titles)}"
+        )
+
+    prompt_tokens = count_tokens(signals_json + contact_json + icp_context)
     use_gemini = prompt_tokens > MAX_GROQ_TOKENS
 
     user_message = (
         f"Company: {company_name}\n\n"
         f"Signals:\n{signals_json}\n\n"
         f"Contact:\n{contact_json}\n\n"
-        f"Seller ICP:\n{icp_description}"
+        f"Seller ICP:\n{icp_context}"
     )
 
     raw = await chat_completion(
@@ -48,6 +70,7 @@ async def run_research_analyst(
         user=user_message,
         temperature=0.4,
         prefer_gemini=use_gemini,
+        task_type="summarize",
     )
 
     brief = _parse_brief(raw)
@@ -60,6 +83,7 @@ async def run_research_analyst(
             user=user_message,
             temperature=0.2,
             prefer_gemini=use_gemini,
+            task_type="summarize",
         )
         brief = _parse_brief(raw)
         brief, _ = check_citations(brief, signals)

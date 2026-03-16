@@ -28,6 +28,18 @@ _GEMINI_API_URL = (
     "gemini-1.5-flash:generateContent"
 )
 
+# ── Model routing: choose the best model per task type ──────────────────────
+#   "groq"   → Llama 3.3 70B via Groq  (fast, great at analysis/scoring)
+#   "gemini" → Gemini 1.5 Flash         (1M context, better at creative prose)
+MODEL_ROUTING: dict[str, str] = {
+    "summarize":   "groq",     # signal and research summarisation
+    "score":       "groq",     # ICP scoring / why_now
+    "draft_email": "gemini",   # email composition — Gemini writes better cold emails
+    "critic":      "groq",     # email quality critique
+    "extract":     "groq",     # structured data extraction
+    "default":     "groq",
+}
+
 
 def count_tokens(text: str) -> int:
     """Heuristic token estimate: 1 token ≈ 4 characters."""
@@ -111,19 +123,25 @@ async def chat_completion(
     user: str,
     temperature: float = 0.7,
     prefer_gemini: bool = False,
+    task_type: str = "default",
 ) -> str:
     """
-    Attempts Groq first (unless prefer_gemini=True for large contexts),
-    falls back to Gemini on any error.
+    Routes to the best model for the given task_type (see MODEL_ROUTING).
+    prefer_gemini=True overrides routing for large-context calls.
+    Falls back to the other provider on any error.
     """
-    if prefer_gemini:
+    routed_to_gemini = prefer_gemini or MODEL_ROUTING.get(task_type, "groq") == "gemini"
+
+    if routed_to_gemini:
         try:
             return await _gemini_chat(system, user, temperature)
         except Exception:
+            # Gemini failed — fall through to Groq
             pass
+        return await _groq_chat(system, user, temperature)
 
+    # Default: Groq first, Gemini as fallback
     try:
         return await _groq_chat(system, user, temperature)
     except Exception:
-        # Fallback to Gemini
         return await _gemini_chat(system, user, temperature)

@@ -57,11 +57,23 @@ app.add_middleware(
 
 async def run_agent_task(job_id: str, req: OutreachRequest) -> None:
     """Runs the full agent pipeline in the background."""
+    # Build icp_description string from structured ICPProfile for prompts
+    icp = req.icp
+    icp_description = (
+        f"Industry: {icp.industry}\n"
+        f"Company size: {icp.size_range}\n"
+        f"Funding stage: {icp.funding_stage}\n"
+        f"Geography: {', '.join(icp.geography) if icp.geography else 'Global'}\n"
+        f"Target titles: {', '.join(icp.target_titles) if icp.target_titles else 'Decision-makers'}\n"
+        f"Pain points we solve: {icp.pain_points}\n"
+        f"Our product/service: {icp.your_product}"
+    )
     state = AgentState(
         job_id=job_id,
         company_name=req.company_name,
         company_domain=req.company_domain,
-        icp_description=req.icp_description,
+        icp_description=icp_description,
+        icp=icp,
         tone=req.tone,
         status="running",
     )
@@ -96,6 +108,9 @@ async def run_outreach(req: OutreachRequest, background: BackgroundTasks) -> Job
             "job_id": job_id,
             "company_name": req.company_name,
             "company_domain": req.company_domain,
+            "icp_industry": req.icp.industry,
+            "icp_size_range": req.icp.size_range,
+            "icp_funding_stage": req.icp.funding_stage,
             "status": "queued",
             "created_at": datetime.now(tz=timezone.utc).isoformat(),
         }).execute()

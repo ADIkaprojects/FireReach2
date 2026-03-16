@@ -17,7 +17,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from models import AgentState, SignalResult, ContactResult, AccountBrief, SendResult
+from models import AgentState, SignalResult, ContactResult, AccountBrief, SendResult, ICPProfile
 from agent.supabase_client import get_supabase
 from agent.tools.signal_harvester import run_signal_harvester
 from agent.tools.contact_resolver import run_contact_resolver
@@ -62,8 +62,17 @@ async def _emit_event(
         pass   # event emission must never block the pipeline
 
 
-async def _score_icp(signals: SignalResult) -> tuple[int, str]:
-    """Score how well signals match the ideal customer profile."""
+async def _score_icp_simple(signals: SignalResult) -> tuple[int, str]:
+    """
+    Legacy simple ICP score (0–10). Replaced by icp_scorer.py in Phase 3.
+    Kept here as a lightweight fallback if ICPProfile is not provided.
+
+    Args:
+        signals: Harvested signal data from Stage 1.
+
+    Returns:
+        Tuple of (score: int, label: str).
+    """
     score = 0
     if signals.funding and signals.funding.round:
         if "series b" in (signals.funding.round or "").lower():
@@ -123,7 +132,7 @@ async def run_agent(state: AgentState) -> AgentState:
             state.signals = signals
             state.iteration += 1
 
-            icp_score, icp_label = await _score_icp(signals)
+            icp_score, icp_label = await _score_icp_simple(signals)
             state.icp_score = icp_score
             state.icp_label = icp_label
 
@@ -151,8 +160,10 @@ async def run_agent(state: AgentState) -> AgentState:
                 f"Resolving decision-maker contact for {state.company_domain}…",
                 "running",
             )
+            target_titles = state.icp.target_titles if state.icp else None
             contact = await run_contact_resolver(
                 company_domain=state.company_domain,
+                target_titles=target_titles,
             )
             state.contact = contact
             state.iteration += 1
@@ -197,6 +208,7 @@ async def run_agent(state: AgentState) -> AgentState:
                 signals=state.signals,
                 contact=state.contact,
                 icp_description=state.icp_description,
+                icp=state.icp,
             )
             state.brief = brief
             state.iteration += 1
@@ -211,6 +223,51 @@ async def run_agent(state: AgentState) -> AgentState:
                     "signal_citations": brief.signal_citations,
                 },
             )
+
+        # ── ICP SCORE GATE ───────────────────────────────────────────────────
+        # Full 0-100 scoring runs when ICPProfile is available.
+        if state.icp and state.signals:
+            from agent.tools.icp_scorer import score_icp_fit
+            score_result = await score_icp_fit(state.signals, state.icp)
+            state.icp_score = score_result["total_score"]
+            state.icp_label = score_result["tier"]
+            state.icp_score_result = score_result
+
+            await _emit_event(
+                state.job_id, "icp_score",
+                f"ICP Score: {score_result['total_score']}/100 — {score_result['tier'].upper()}",
+                "running",
+                score_result,
+            )
+
+            if score_result["total_score"] < 30:
+                state.status = "skipped_poor_fit"
+                state.email_result = SendResult(
+                    status="skipped_poor_fit",
+                    error=f"ICP score {score_result['total_score']}/100 is below threshold (30). "
+                          f"Red flags: {', '.join(score_result.get('red_flags', []) or ['poor fit'])}",
+                )
+                await _emit_event(
+                    state.job_id, "icp_score",
+                    f"Skipped — ICP score {score_result['total_score']}/100 below 30 threshold",
+                    "done",
+                    score_result,
+                )
+                return state
+
+            elif score_result["total_score"] < 45:
+                state.status = "queued_potential"
+                state.email_result = SendResult(
+                    status="queued_potential",
+                    error=f"ICP score {score_result['total_score']}/100 — queued for 30-day review",
+                )
+                await _emit_event(
+                    state.job_id, "icp_score",
+                    f"Queued — ICP score {score_result['total_score']}/100 below 45 threshold — revisit in 30 days",
+                    "done",
+                    score_result,
+                )
+                return state
 
         # ── STAGE 4: Outreach Sender ─────────────────────────────────────────
         call_hash = _tool_call_hash("outreach_sender", {

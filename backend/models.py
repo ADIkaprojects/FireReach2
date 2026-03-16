@@ -8,6 +8,19 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+# ─── ICP Profile ────────────────────────────────────────────────────────────
+
+class ICPProfile(BaseModel):
+    """Ideal Customer Profile — defines the type of company to target and the value prop."""
+    industry: str = Field(..., description="e.g. SaaS, Fintech, Healthcare")
+    size_range: str = Field(..., description="e.g. 50-200")
+    funding_stage: str = Field(..., description="e.g. Series A")
+    geography: list[str] = Field(default_factory=list, description="e.g. ['US', 'Europe']")
+    pain_points: str = Field(..., description="What problem your product solves")
+    your_product: str = Field(..., description="What you are offering")
+    target_titles: list[str] = Field(default_factory=list, description="e.g. ['CTO', 'VP Engineering']")
+
+
 # ─── Stage 1: Signal Harvester ─────────────────────────────────────────────
 
 class FundingResult(BaseModel):
@@ -37,6 +50,12 @@ class SignalResult(BaseModel):
     hiring_roles: list[HiringRole] = Field(default_factory=list)
     tech_stack: list[str] = Field(default_factory=list)
     news: Optional[NewsResult] = None
+    # S3 — Security/Compliance signals
+    security_signal: Optional[dict] = None
+    # S4 — Sales/Partnership signals
+    sales_signal: Optional[dict] = None
+    # S6 — Market/Lead signals
+    market_signal: Optional[dict] = None
 
     def non_null_keys(self) -> list[str]:
         keys = []
@@ -48,6 +67,12 @@ class SignalResult(BaseModel):
             keys.append("tech_stack")
         if self.news and self.news.headline:
             keys.append("news")
+        if self.security_signal:
+            keys.append("security_signal")
+        if self.sales_signal:
+            keys.append("sales_signal")
+        if self.market_signal:
+            keys.append("market_signal")
         return keys
 
 
@@ -61,6 +86,8 @@ class ContactResult(BaseModel):
     confidence: float = 0.0
     source: Optional[str] = None
     smtp_verified: bool = False
+    linkedin_url: Optional[str] = None
+    seniority: Optional[str] = None
     reason: Optional[str] = None   # populated when found=False
 
 
@@ -86,10 +113,11 @@ class EmailDraft(BaseModel):
 
 class SendResult(BaseModel):
     message_id: Optional[str] = None
-    status: Literal["sent", "failed", "skipped_duplicate", "contact_not_found"]
+    status: Literal["sent", "failed", "skipped_duplicate", "contact_not_found", "skipped_poor_fit", "queued_potential"]
     email_preview: Optional[str] = None
     quality_score: Optional[float] = None
     error: Optional[str] = None
+    subject: Optional[str] = None
 
 
 # ─── Agent State ────────────────────────────────────────────────────────────
@@ -99,6 +127,7 @@ class AgentState(BaseModel):
     company_name: str
     company_domain: str
     icp_description: str
+    icp: Optional[ICPProfile] = None
     tone: Literal["warm", "direct", "consultative"] = "consultative"
 
     messages: list[dict] = Field(default_factory=list)
@@ -108,10 +137,13 @@ class AgentState(BaseModel):
     email_result: Optional[SendResult] = None
 
     iteration: int = 0
-    status: Literal["queued", "running", "done", "error"] = "queued"
+    status: Literal[
+        "queued", "running", "done", "error", "skipped_poor_fit", "queued_potential"
+    ] = "queued"
     error_message: Optional[str] = None
     icp_score: Optional[int] = None
     icp_label: Optional[str] = None
+    icp_score_result: Optional[dict] = None
 
 
 # ─── API Request / Response ─────────────────────────────────────────────────
@@ -119,7 +151,7 @@ class AgentState(BaseModel):
 class OutreachRequest(BaseModel):
     company_name: str = Field(..., min_length=1, max_length=200)
     company_domain: str = Field(..., min_length=3, max_length=200)
-    icp_description: str = Field(..., min_length=10, max_length=2000)
+    icp: ICPProfile
     tone: Literal["warm", "direct", "consultative"] = "consultative"
 
 
