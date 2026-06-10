@@ -103,7 +103,10 @@ export default function Home() {
   const icpScoreResult = icpScoreEvent?.data as Record<string, unknown> | null | undefined;
 
   const stage2Event = lastByStage('stage_2');
-  const contact = stage2Event?.data as Record<string, unknown> | null | undefined;
+  let contact = stage2Event?.data as Record<string, unknown> | null | undefined;
+  if (contact && 'contact' in contact) {
+    contact = contact.contact as Record<string, unknown>;
+  }
 
   const stage1Event = lastByStage('stage_1');
   const signalsData = stage1Event?.data as Record<string, unknown> | null | undefined;
@@ -310,7 +313,7 @@ export default function Home() {
           {/* ── Results row: Contact + Signals ── */}
           {(contact || signalRows.length > 0) && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {contact && contact.name && (
+              {contact && (
                 <section>
                   <h2
                     className="text-sm font-bold uppercase tracking-widest mb-3"
@@ -319,9 +322,9 @@ export default function Home() {
                     Contact
                   </h2>
                   <ContactCard
-                    name={String(contact.name)}
-                    title={String(contact.title ?? '')}
-                    email={String(contact.email ?? '')}
+                    name={contact.name ? String(contact.name) : "Contact Not Found"}
+                    title={contact.title ? String(contact.title) : "Could not resolve decision-maker"}
+                    email={contact.email ? String(contact.email) : "No email found"}
                     verified={!!contact.smtp_verified}
                     linkedin_url={contact.linkedin_url ? String(contact.linkedin_url) : undefined}
                     seniority={contact.seniority ? String(contact.seniority) : undefined}
